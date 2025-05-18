@@ -210,50 +210,242 @@ print("\nTraining plots saved to training_history.png")
 ```
 ## 🧠 Code Explanation
 
-### 1. **Data Loading**
-The dataset (`train.csv`) is loaded in memory-efficient chunks using pandas. This helps to handle large datasets without running into memory issues.
+1. Data Loading in Chunks
+```python
 
-### 2. **Text Preprocessing**
-The question text is cleaned using a regular expression to retain only alphabetic characters and converted to lowercase.
+chunk_size = 100000
+chunks = pd.read_csv("train.csv", chunksize=chunk_size)
+df = pd.concat(chunks)
+```
+Explanation:
 
-### 3. **Sampling**
-A stratified sample of 100,000 rows is taken to ensure class balance and maintain representative distributions of spam and non-spam questions.
+Loads the large CSV file (train.csv) in chunks of 100,000 rows using pandas.read_csv with chunksize.
 
-### 4. **Train-Validation-Test Split**
-The data is split into training (70%), validation (15%), and test (15%) sets using `train_test_split` with stratification to preserve class distribution.
+pd.concat() merges the chunks into a single DataFrame df. This approach prevents memory errors when working with large datasets.
 
-### 5. **Tokenization**
-Keras `Tokenizer` is used to convert text into sequences and pad them to a uniform length of 50 tokens. A vocabulary size of 30,000 is used.
+2. Text Cleaning Function
+```python
 
-### 6. **Pretrained Word Embeddings**
-100-dimensional GloVe embeddings (`glove.6B.100d.txt`) are loaded and used to initialize the embedding layer. This layer is set to non-trainable to retain semantic integrity.
+def clean_text(text):
+    text = re.sub(r'[^A-Za-z\s]', '', text)  # Remove non-alphabetic characters
+    text = text.lower()                      # Convert to lowercase
+    return text
 
-### 7. **Model Architecture**
-- Embedding Layer (pre-trained GloVe)
-- Conv1D Layer (64 filters)
-- GlobalMaxPooling
-- Dense Layer (32 units)
-- Dropout Layer (0.3)
-- Output Layer (Sigmoid for binary classification)
+df['cleaned_text'] = df['question_text'].astype(str).apply(clean_text)
+```
+Explanation:
 
-The model uses the Adam optimizer and binary cross-entropy loss function, and it is evaluated using Accuracy, Precision, and Recall.
+A custom function clean_text removes non-alphabetic characters using regex and converts text to lowercase.
 
-### 8. **Model Training**
-- Early stopping and model checkpointing are used.
-- Model is trained with a batch size of 128 over 8 epochs.
+The cleaning is applied to each question using .apply(). The cleaned version is stored in a new column cleaned_text.
 
-### 9. **Evaluation**
-The best saved model is evaluated in chunks on the test set to avoid memory issues. Metrics are calculated and printed.
+3. Stratified Sampling
+```python
 
-### 10. **Predictions**
-Predicted results on the test set are saved to a CSV file (`quora_predictions.csv`) containing:
-- Cleaned text
-- True label
-- Predicted label
-- Prediction probability
+df_sample = df.groupby('target', group_keys=False).apply(lambda x: x.sample(50000))
+df_sample = df_sample.sample(frac=1).reset_index(drop=True)  # Shuffle
+```
+Explanation:
 
-### 11. **Training Visualization**
-Accuracy and loss plots are saved to `training_history.png`.
+Samples 50,000 rows each from the spam (target=1) and non-spam (target=0) groups.
+
+This creates a balanced dataset of 100,000 rows, shuffled for randomness.
+
+4. Train-Test Split
+```python
+
+X = df_sample['cleaned_text']
+y = df_sample['target']
+
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, stratify=y, random_state=42)
+X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=42)
+```
+Explanation:
+
+Splits the data into training (70%), validation (15%), and test (15%) sets.
+
+Stratification ensures the class ratio is preserved across all subsets.
+
+5. Tokenization and Padding
+```python
+
+tokenizer = Tokenizer(num_words=30000, oov_token="<OOV>")
+tokenizer.fit_on_texts(X_train)
+
+X_train_seq = tokenizer.texts_to_sequences(X_train)
+X_val_seq = tokenizer.texts_to_sequences(X_val)
+X_test_seq = tokenizer.texts_to_sequences(X_test)
+
+max_len = 50
+X_train_pad = pad_sequences(X_train_seq, maxlen=max_len, padding='post')
+X_val_pad = pad_sequences(X_val_seq, maxlen=max_len, padding='post')
+X_test_pad = pad_sequences(X_test_seq, maxlen=max_len, padding='post')
+```
+Explanation:
+
+Tokenizer converts text into sequences of integers based on word frequency.
+
+Sequences are padded to a uniform length of 50 using pad_sequences.
+
+Padding ensures input shape consistency for the neural network.
+
+6. Loading Pre-trained GloVe Embeddings
+```python
+
+embedding_index = {}
+with open('glove.6B.100d.txt', encoding='utf8') as f:
+    for line in f:
+        values = line.split()
+        word = values[0]
+        coeffs = np.asarray(values[1:], dtype='float32')
+        embedding_index[word] = coeffs
+```
+Explanation:
+
+Loads GloVe embeddings into a dictionary embedding_index with words as keys and vectors as values.
+
+These embeddings provide semantic meaning to words learned from a large corpus.
+
+7. Creating the Embedding Matrix
+```python
+
+embedding_dim = 100
+embedding_matrix = np.zeros((30000, embedding_dim))
+word_index = tokenizer.word_index
+
+for word, i in word_index.items():
+    if i < 30000:
+        embedding_vector = embedding_index.get(word)
+        if embedding_vector is not None:
+            embedding_matrix[i] = embedding_vector
+```
+Explanation:
+
+Constructs a 2D matrix where each row is the embedding vector for a word.
+
+If a word is not found in GloVe, its vector remains as zeros.
+
+8. Model Architecture
+```python
+
+model = Sequential()
+model.add(Embedding(30000, embedding_dim, weights=[embedding_matrix], input_length=max_len, trainable=False))
+model.add(Conv1D(64, 5, activation='relu'))
+model.add(GlobalMaxPooling1D())
+model.add(Dense(32, activation='relu'))
+model.add(Dropout(0.3))
+model.add(Dense(1, activation='sigmoid'))
+```
+Explanation:
+
+Embedding layer uses pre-trained GloVe vectors and is frozen (non-trainable).
+
+Conv1D layer detects local patterns in text.
+
+GlobalMaxPooling1D reduces output to the most important features.
+
+Dense and Dropout layers help with learning and regularization.
+
+Output Dense layer with sigmoid activation outputs a probability (binary classification).
+
+9. Compilation and Training
+```python
+
+model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy', Precision(), Recall()])
+
+checkpoint = ModelCheckpoint("best_model.keras", save_best_only=True)
+earlystop = EarlyStopping(patience=2, restore_best_weights=True)
+
+history = model.fit(X_train_pad, y_train, 
+                    epochs=8, batch_size=128, 
+                    validation_data=(X_val_pad, y_val), 
+                    callbacks=[checkpoint, earlystop])
+```
+Explanation:
+
+Model is compiled with binary cross-entropy loss and Adam optimizer.
+
+Accuracy, Precision, and Recall are tracked.
+
+ModelCheckpoint saves the best model based on validation loss.
+
+EarlyStopping halts training if no improvement is seen.
+
+10. Model Evaluation in Chunks
+```python
+
+model = load_model("best_model.keras", custom_objects={"Precision": Precision, "Recall": Recall})
+
+y_pred_probs = []
+y_pred_labels = []
+y_true = []
+
+chunk_size = 10000
+for i in range(0, len(X_test_pad), chunk_size):
+    X_batch = X_test_pad[i:i+chunk_size]
+    y_batch = y_test.iloc[i:i+chunk_size]
+    probs = model.predict(X_batch)
+    preds = (probs > 0.5).astype(int)
+    
+    y_pred_probs.extend(probs.flatten())
+    y_pred_labels.extend(preds.flatten())
+    y_true.extend(y_batch)
+```
+Explanation:
+
+The best model is loaded for evaluation.
+
+Test data is processed in batches to handle memory efficiently.
+
+Predictions and true labels are collected for metric calculation.
+
+11. Saving Predictions to CSV
+```python
+
+output_df = pd.DataFrame({
+    "text": X_test.values,
+    "true_label": y_test.values,
+    "predicted_label": y_pred_labels,
+    "prediction_prob": y_pred_probs
+})
+output_df.to_csv("quora_predictions.csv", index=False)
+```
+
+Explanation:
+
+A DataFrame is created with actual text, true labels, predictions, and prediction probabilities.
+
+This file is useful for error analysis or reporting.
+
+12. Plotting Training History
+    
+```python
+
+plt.figure(figsize=(10, 5))
+plt.subplot(1, 2, 1)
+plt.plot(history.history['accuracy'], label='Train Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.legend()
+plt.title("Model Accuracy")
+
+plt.subplot(1, 2, 2)
+plt.plot(history.history['loss'], label='Train Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.legend()
+plt.title("Model Loss")
+
+plt.savefig("training_history.png")
+plt.show()
+
+```
+
+Explanation:
+
+Visualizes training and validation accuracy/loss over epochs.
+
+Saved as training_history.png for documentation and insights.
+
+
 
 ---
 
@@ -287,12 +479,6 @@ The output file `quora_predictions.csv` contains:
 - **prediction_prob**: The probability assigned by the model for the question being spam.
 
 This file can be used for post-analysis, manual validation, or building a dashboard to visualize model predictions.
-
----
-
-## 🧾 Submission Instructions
-
-Please upload the code and README to a GitHub repository and send the repository link to: `lalit.sachan@edvancer.in`.
 
 ---
 
